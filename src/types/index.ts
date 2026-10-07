@@ -34,6 +34,7 @@ export interface CartItem {
 export interface User {
   id: string;
   google_id?: string | null;
+  password_hash?: string | null;
   email: string;
   name: string;
   avatar_url?: string | null;

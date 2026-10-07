@@ -61,6 +61,7 @@ export async function initDatabase(): Promise<{ success: boolean; message: strin
       CREATE TABLE IF NOT EXISTS users (
         id VARCHAR(64) PRIMARY KEY,
         google_id VARCHAR(128) UNIQUE,
+        password_hash VARCHAR(255),
         email VARCHAR(255) NOT NULL UNIQUE,
         name VARCHAR(255) NOT NULL,
         avatar_url TEXT,
@@ -635,6 +636,7 @@ export async function getUserOrders(userIdOrEmail: string): Promise<Order[]> {
 export async function upsertUser(user: {
   id?: string;
   google_id?: string;
+  password_hash?: string;
   email: string;
   name: string;
   avatar_url?: string;
@@ -644,6 +646,7 @@ export async function upsertUser(user: {
   const fullUser: User = {
     id: userId,
     google_id: user.google_id || null,
+    password_hash: user.password_hash || null,
     email: user.email.toLowerCase(),
     name: user.name,
     avatar_url: user.avatar_url || null,
@@ -658,6 +661,7 @@ export async function upsertUser(user: {
       type RawDbUser = {
         id: string;
         google_id?: string | null;
+        password_hash?: string | null;
         email: string;
         name: string;
         avatar_url?: string | null;
@@ -665,12 +669,13 @@ export async function upsertUser(user: {
         created_at?: string;
       };
       const rawRows = await sql`
-        INSERT INTO users (id, google_id, email, name, avatar_url, role)
-        VALUES (${fullUser.id}, ${fullUser.google_id}, ${fullUser.email}, ${fullUser.name}, ${fullUser.avatar_url}, ${fullUser.role})
+        INSERT INTO users (id, google_id, password_hash, email, name, avatar_url, role)
+        VALUES (${fullUser.id}, ${fullUser.google_id}, ${fullUser.password_hash}, ${fullUser.email}, ${fullUser.name}, ${fullUser.avatar_url}, ${fullUser.role})
         ON CONFLICT (email) DO UPDATE SET
           name = EXCLUDED.name,
           avatar_url = COALESCE(EXCLUDED.avatar_url, users.avatar_url),
           google_id = COALESCE(EXCLUDED.google_id, users.google_id),
+          password_hash = COALESCE(EXCLUDED.password_hash, users.password_hash),
           updated_at = CURRENT_TIMESTAMP
         RETURNING *;
       `;
@@ -695,6 +700,7 @@ export async function getUserByEmail(email: string): Promise<User | null> {
       type RawDbUser = {
         id: string;
         google_id?: string | null;
+        password_hash?: string | null;
         email: string;
         name: string;
         avatar_url?: string | null;
