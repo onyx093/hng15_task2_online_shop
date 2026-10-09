@@ -22,3 +22,14 @@ export async function getBearerTokenUser(request: NextRequest | Request): Promis
   const dbUser = await getUserByEmail(sessionUser.email);
   return dbUser || sessionUser;
 }
+
+import { getCurrentUser } from './auth';
+
+/**
+ * Gets the user from either Bearer token (mobile) or Cookie session (web).
+ */
+export async function getUnifiedUser(request: NextRequest): Promise<User | null> {
+  const bearerUser = await getBearerTokenUser(request);
+  if (bearerUser) return bearerUser;
+  return getCurrentUser();
+}

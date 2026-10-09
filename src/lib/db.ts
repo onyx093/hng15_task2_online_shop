@@ -8,6 +8,7 @@ class MemoryStore {
   products: Product[] = [...INITIAL_PRODUCTS];
   users: Map<string, User> = new Map();
   orders: Map<string, Order> = new Map();
+  cart: Map<string, { product_id: string; quantity: number }[]> = new Map();
 
   constructor() {
     // Add a default demo user
@@ -43,6 +44,7 @@ export function getNeonSql(): NeonQueryFunction<false, false> | null {
   }
 }
 
+let dbInitPromise: Promise<any> | null = null;
 let dbInitialized = false;
 
 export async function initDatabase(): Promise<{ success: boolean; message: string; isNeon: boolean }> {
@@ -148,6 +150,19 @@ export async function initDatabase(): Promise<{ success: boolean; message: strin
       );
     `;
 
+    // Create Cart Items table
+    await sql`
+      CREATE TABLE IF NOT EXISTS cart_items (
+        id VARCHAR(64) PRIMARY KEY,
+        user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        product_id VARCHAR(64) NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+        quantity INTEGER NOT NULL DEFAULT 1,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, product_id)
+      );
+    `;
+
     // Seed categories if empty
     const existingCategories = (await sql`SELECT count(*) FROM categories`) as { count: string }[];
     if (parseInt(existingCategories[0]?.count || '0', 10) === 0) {
@@ -190,11 +205,15 @@ export async function initDatabase(): Promise<{ success: boolean; message: strin
   }
 }
 
-// Auto-run init check lazily
+// Auto-run init check lazily with concurrency lock
 async function ensureDb() {
-  if (!dbInitialized && isNeonConfigured()) {
-    await initDatabase();
+  if (dbInitialized || !isNeonConfigured()) return;
+  if (!dbInitPromise) {
+    dbInitPromise = initDatabase()
+      .then(() => { dbInitialized = true; })
+      .catch((e) => { dbInitPromise = null; throw e; });
   }
+  await dbInitPromise;
 }
 
 // --- Product & Category Queries ---
@@ -257,7 +276,7 @@ export async function getProducts(options?: {
       }
 
       // Execute dynamic query with neon parameter array
-      const rawRows = await (sql as unknown as (q: string, p?: unknown[]) => Promise<unknown[]>)(queryStr, params);
+      const rawRows = await (sql as any).query(queryStr, params);
       type DbProductRow = {
         id: string;
         title: string;
@@ -717,4 +736,112 @@ export async function getUserByEmail(email: string): Promise<User | null> {
     }
   }
   return memoryStore.users.get(email.toLowerCase()) || null;
+}
+
+// --- Cart Operations ---
+
+export async function getCart(userId: string): Promise<import('@/types').CartItem[]> {
+  const sql = getNeonSql();
+  if (sql) {
+    try {
+      await ensureDb();
+      const rows = await sql`
+        SELECT c.quantity, p.*, cat.name as category_name
+        FROM cart_items c
+        JOIN products p ON c.product_id = p.id
+        LEFT JOIN categories cat ON p.category_id = cat.id
+        WHERE c.user_id = ${userId}
+        ORDER BY c.created_at DESC
+      `;
+      return (rows as any[]).map(r => {
+        const product: import('@/types').Product = {
+          id: r.id,
+          title: r.title,
+          slug: r.slug,
+          description: r.description,
+          price: Number(r.price),
+          compare_at_price: r.compare_at_price ? Number(r.compare_at_price) : null,
+          category_id: r.category_id,
+          category_name: r.category_name,
+          image_url: r.image_url,
+          images: typeof r.images === 'string' ? JSON.parse(r.images) : r.images || [],
+          rating: Number(r.rating),
+          rating_count: r.rating_count,
+          stock: r.stock,
+          featured: r.featured,
+          dimensions: r.dimensions,
+          materials: r.materials,
+          created_at: r.created_at,
+        };
+        return { product, quantity: r.quantity };
+      });
+    } catch (e) {
+      console.error('Error fetching cart from Neon:', e);
+    }
+  }
+
+  // Memory fallback
+  const items = memoryStore.cart.get(userId) || [];
+  const cartItems: import('@/types').CartItem[] = [];
+  for (const item of items) {
+    const p = memoryStore.products.find(prod => prod.id === item.product_id);
+    if (p) {
+      cartItems.push({ product: p, quantity: item.quantity });
+    }
+  }
+  return cartItems;
+}
+
+export async function syncCartItem(userId: string, productId: string, quantity: number): Promise<void> {
+  const sql = getNeonSql();
+  if (sql) {
+    try {
+      await ensureDb();
+      if (quantity <= 0) {
+        await sql`DELETE FROM cart_items WHERE user_id = ${userId} AND product_id = ${productId}`;
+      } else {
+        const id = `cart_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 6)}`;
+        await sql`
+          INSERT INTO cart_items (id, user_id, product_id, quantity)
+          VALUES (${id}, ${userId}, ${productId}, ${quantity})
+          ON CONFLICT (user_id, product_id) DO UPDATE SET
+            quantity = EXCLUDED.quantity,
+            updated_at = CURRENT_TIMESTAMP
+        `;
+      }
+      return;
+    } catch (e) {
+      console.error('Error syncing cart item in Neon:', e);
+    }
+  }
+
+  // Memory fallback
+  let items = memoryStore.cart.get(userId) || [];
+  if (quantity <= 0) {
+    items = items.filter(i => i.product_id !== productId);
+  } else {
+    const existing = items.find(i => i.product_id === productId);
+    if (existing) {
+      existing.quantity = quantity;
+    } else {
+      items.push({ product_id: productId, quantity });
+    }
+  }
+  memoryStore.cart.set(userId, items);
+}
+
+export async function clearCart(userId: string): Promise<void> {
+  const sql = getNeonSql();
+  if (sql) {
+    try {
+      await ensureDb();
+      await sql`DELETE FROM cart_items WHERE user_id = ${userId}`;
+      return;
+    } catch (e) {
+      console.error('Error clearing cart in Neon:', e);
+    }
+  }
+
+  // Memory fallback
+  memoryStore.cart.set(userId, []);
 }
